@@ -5,35 +5,39 @@ import seaborn as sns
 from matplotlib.pyplot import figure
 import matplotlib.mlab as mlab
 import matplotlib
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.model_selection import train_test_split
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.model_selection import train_test_split
 from keras.models import Sequential
 from keras.layers import Dense
 from keras.optimizers import Adam
 from keras.utils import to_categorical
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.feature_selection import SelectKBest, chi2
 from sklearn.feature_selection import RFE
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.ensemble import RandomForestClassifier
 import matplotlib.pyplot as plt
-from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import RFE
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import silhouette_score
 
 from django.db import connection
 
 from django.core.management.base import BaseCommand
+
+
+def parse_subject_grades(grade_str):
+    import pandas as pd
+    if pd.isna(grade_str):
+        return {}
+    parts = grade_str.split(';')
+    grades = {}
+    for part in parts:
+        if ':' in part:
+            subject, grade = part.strip().split(':')
+            grades[subject.strip()] = float(grade.strip())
+    return grades
 
 class Command(BaseCommand):
     help = 'Run analytics script'
@@ -144,6 +148,7 @@ class Command(BaseCommand):
 
         # Функция для парсинга строки в словарь
         def parse_subject_grades(grade_str):
+            import pandas as pd
             if pd.isna(grade_str):
                 return {}
             parts = grade_str.split(';')
@@ -163,13 +168,10 @@ class Command(BaseCommand):
                 return None
             return sum(grades_dict.values()) / len(grades_dict)
 
-        print(students['Grades_Dict'])
         students['Mean_Subject_Grade'] = students['Grades_Dict'].apply(mean_grade)
-        print('Работа с долгами')
         debts_list=[]
-        for i in range(1325):
+        for i in range(len(students)):
             debts_list.append(students['Debts_List'][i].split(','))
-            print(debts_list)
 
         for i in range(len(students)):
             if isinstance(students['Grades_Dict'][i], dict) and isinstance(debts_list[i], list):
@@ -194,11 +196,7 @@ class Command(BaseCommand):
         # Заменяем NaN и None на 0 во всей таблице
         students = students.fillna(0)
 
-        # Выводим всю таблицу
-        print(students)
 
-        # Или сохранение в CSV (рекомендуется для больших таблиц):
-        students.to_csv('students_with_all_columns.csv', index=False, sep=';', encoding='utf-8')
 
         import numpy as np
         from sklearn.cluster import KMeans
@@ -243,11 +241,6 @@ class Command(BaseCommand):
             kmeans.fit(scaled_data.fillna(0))  # Заполняем NaN нулями только для метода локтя и обучаем модель
             inertia.append(kmeans.inertia_)  # Добавляем значение инерции в список
 
-        plt.plot(range(1, 11), inertia, marker='o')  # Строим график
-        plt.xlabel("Количество кластеров (k)")
-        plt.ylabel("Инерция")
-        plt.title("Метод локтя для кластеризации предметов")
-        plt.show()  # Показываем график
 
 
         k = 2  # Выбираем k на основе графика (хотя там вообще один кластер можно бы поставить)
@@ -264,11 +257,6 @@ class Command(BaseCommand):
         kmeans.fit(distance_matrix)  # Обучаем KMeans на матрице расстояний
         subject_clusters = kmeans.labels_  # Получаем метки кластеров для предметов
 
-        # 8. Добавление информации о кластерах для предметов
-        subject_cluster_mapping = dict(zip(all_subjects_3rd_year, subject_clusters)) # Создаем словарь {предмет: номер_кластера}
-        print("\nСоответствие предметов кластерам:")
-        for subject, cluster in subject_cluster_mapping.items(): # Выводим результаты
-            print(f"{subject}: Кластер {cluster}")
 
         # 1. Подготовка данных (3 курс)
         semester_5_6_data = students.iloc[364:728].copy()
@@ -349,8 +337,6 @@ class Command(BaseCommand):
             y_pred = model.predict(X_predict.fillna(0))  # Предсказываем, заполняя NaN нулями
             predictions[subject] = y_pred
 
-            print(f"Classification report for {subject}:")
-            print(classification_report(predict_data[subject].apply(lambda x: 'Высокая' if x >= 4 else ('Низкая' if x < 4 and x > -1 else 'Долг')), y_pred))
 
         # 10. Добавление предсказаний в DataFrame
         for subject, pred in predictions.items():
@@ -360,25 +346,6 @@ class Command(BaseCommand):
         num_subjects = len(predict_features)  # Получаем количество предметов
         cols = 3  # Количество столбцов для подграфиков
         rows = (num_subjects + cols - 1) // cols  # Вычисляем количество строк
-
-        plt.figure(figsize=(16, 5 * rows))  # Увеличиваем высоту фигуры в зависимости от количества строк
-        for i, subject in enumerate(predict_features, 1):
-            plt.subplot(rows, cols, i)  # Настройка сетки подграфиков
-            sns.countplot(data=predict_data, x=f'{subject}_prediction', palette='viridis')
-            plt.title(f'Предсказания для {subject}')
-            plt.xlabel('Категория')
-            plt.ylabel('Количество')
-        plt.tight_layout()
-        plt.show()
-
-
-        # 12. Вывод результатов
-        print(predict_data)
-
-
-
-
-
 
 
         # Выбираем нужные столбцы
@@ -397,6 +364,6 @@ class Command(BaseCommand):
         ]
 
         # Сохраняем в CSV
-        result_data.to_csv('predictions_results.csv', index=False, sep=';', encoding='utf-8')
+        result_data.to_csv('application/management/predictions_results.csv', index=False, sep=';', encoding='utf-8')
         
 

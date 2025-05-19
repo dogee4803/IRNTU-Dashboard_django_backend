@@ -17,6 +17,22 @@ from .models import Student, Debts, Group
 
 from itertools import chain
 
+from application.management.commands import analytics
+
+from rest_framework.permissions import AllowAny, IsAuthenticated
+
+from rest_framework.viewsets import ViewSet
+
+from django.core.management import call_command
+
+from rest_framework.decorators import action
+
+import os
+
+import pandas as pd
+
+import csv
+
 class GradesViewset(mixins.ListModelMixin, GenericViewSet):
     queryset = Grades.objects.select_related('student', 'student__group', 'fc')
     serializer_class = GradesSerializer
@@ -909,3 +925,103 @@ class StudentRatingViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             'chartData': chartData,
             'students': students
         }, status=status.HTTP_200_OK)
+    
+class TrainModelViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        try:
+            call_command('analytics')
+            return Response(
+                {"message": "Модель успешно обучена, результаты сохранены в CSV."},
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+
+            
+class StudentAnalyticsViewSet(viewsets.ViewSet):
+    """
+    Эндпоинт для получения аналитики студента из CSV файла
+    Параметры:
+    - student_id (обязательный)
+    - subjects
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = None  # Не требуется модель
+    
+    def get_csv_path(self):
+        """Путь к сгенерированному CSV файлу"""
+        return 'application/management/predictions_results.csv'
+
+    def read_csv_data(self):
+        """Чтение и кэширование CSV данных"""
+        csv_path = self.get_csv_path()
+
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError("Analytics file not generated yet")
+
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            return list(csv.DictReader(f, delimiter=';'))  
+
+    def list(self, request, *args, **kwargs):
+        student_id = request.query_params.get('student_id')
+        subjects_filter = request.query_params.getlist('subjects', [])
+
+        if not student_id:
+            return Response(
+                {"error": "Missing required parameter: student_id"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            csv_data = self.read_csv_data()
+        except FileNotFoundError as e:
+            return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
+
+        # Найдём строку нужного студента
+        student_row = next((row for row in csv_data if row['Student_ID'] == student_id), None)
+
+        if not student_row:
+            return Response(
+                {"error": f"Student with ID {student_id} not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Отдельные ключи для основной информации
+        core_fields = [
+            'Speciality', 'Group_Name', 'Student_ID', 'Name', 'Age', 'Is_Academic',
+            'Middle_value_of_sertificate', 'Entry_score', 'Rating_score', 'Diploma_grade'
+        ]
+
+        # Соберём информацию
+        response_data = {
+            "student_id": student_row["Student_ID"],
+            "name": student_row["Name"],
+            "age": int(student_row["Age"]),
+            "group": student_row["Group_Name"],
+            "speciality": student_row["Speciality"],
+            "academic_info": {
+                "certificate_score": float(student_row["Middle_value_of_sertificate"]),
+                "entry_score": float(student_row["Entry_score"]),
+                "rating_score": float(student_row["Rating_score"]),
+                "diploma_grade": float(student_row["Diploma_grade"]),
+                "is_academic": bool(int(student_row["Is_Academic"]))
+            },
+            "subjects": []
+        }
+
+        # Отбор предметов: все поля, кроме core_fields
+        for subject, grade in student_row.items():
+            if subject not in core_fields:
+                if not subjects_filter or subject in subjects_filter:
+                    response_data["subjects"].append({
+                        "subject": subject,
+                        "grade": grade
+                    })
+
+        return Response(response_data)
