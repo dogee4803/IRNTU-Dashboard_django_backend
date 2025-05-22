@@ -26,6 +26,12 @@ from django.db import connection
 
 from django.core.management.base import BaseCommand
 
+from sklearn.cluster import KMeans
+from sklearn.metrics import pairwise_distances
+
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import make_pipeline
+from sklearn.compose import ColumnTransformer
 
 def parse_subject_grades(grade_str):
     import pandas as pd
@@ -143,12 +149,11 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         
-
+        #students = pd.read_csv('project_db.csv', sep=';')
         students = self.get_students_from_db()
 
         # Функция для парсинга строки в словарь
         def parse_subject_grades(grade_str):
-            import pandas as pd
             if pd.isna(grade_str):
                 return {}
             parts = grade_str.split(';')
@@ -168,10 +173,13 @@ class Command(BaseCommand):
                 return None
             return sum(grades_dict.values()) / len(grades_dict)
 
+
         students['Mean_Subject_Grade'] = students['Grades_Dict'].apply(mean_grade)
+
         debts_list=[]
         for i in range(len(students)):
             debts_list.append(students['Debts_List'][i].split(','))
+
 
         for i in range(len(students)):
             if isinstance(students['Grades_Dict'][i], dict) and isinstance(debts_list[i], list):
@@ -179,7 +187,7 @@ class Command(BaseCommand):
                     subject = subject.strip()  # удаляем лишние пробелы
                     if subject in students['Grades_Dict'][i]:
                         students['Grades_Dict'][i][subject] = 'Долг'
-        print(students['Grades_Dict'][1])
+
         # Добавляем отдельные столбцы для предметов и оценок
         all_subjects = set()  # Используем множество для уникальных предметов
         for grades_dict in students['Grades_Dict']:
@@ -196,13 +204,6 @@ class Command(BaseCommand):
         # Заменяем NaN и None на 0 во всей таблице
         students = students.fillna(0)
 
-
-
-        import numpy as np
-        from sklearn.cluster import KMeans
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.metrics import pairwise_distances
-        import matplotlib.pyplot as plt
 
         # 1. Подготовка данных для кластеризации (3 курс)
         semester_5_6_data = students.iloc[364:524].copy()  # Копируем данные студентов 3 курса
@@ -257,6 +258,11 @@ class Command(BaseCommand):
         kmeans.fit(distance_matrix)  # Обучаем KMeans на матрице расстояний
         subject_clusters = kmeans.labels_  # Получаем метки кластеров для предметов
 
+        # 8. Добавление информации о кластерах для предметов
+        subject_cluster_mapping = dict(zip(all_subjects_3rd_year, subject_clusters)) # Создаем словарь {предмет: номер_кластера}
+
+
+
 
         # 1. Подготовка данных (3 курс)
         semester_5_6_data = students.iloc[364:728].copy()
@@ -283,87 +289,139 @@ class Command(BaseCommand):
         numeric_data[mask] = scaled_values  # Возвращаем масштабированные данные в DataFrame
         scaled_data = numeric_data  # Переименовываем для ясности
 
-        import pandas as pd
-        import numpy as np
 
-        import matplotlib.pyplot as plt
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.metrics import classification_report
+        def prepare_data(students):
+            # Создаем отдельные колонки для каждого предмета
+            all_subjects = set()
+            for grades in students['Grades_Dict']:
+                all_subjects.update(grades.keys())
+            
+            for subject in all_subjects:
+                students[subject] = students['Grades_Dict'].apply(lambda x: x.get(subject, np.nan))
+            
+            # Обработка долгов и пропущенных значений
+            students.replace('Долг', -1, inplace=True)
+            students.fillna(0, inplace=True)
+            return students, list(all_subjects)
 
-        # --- Подготовка данных ---
+        # Загрузка данных
+        students = self.get_students_from_db()
+        students['Grades_Dict'] = students['All_Grades_Per_Subject'].apply(
+            lambda x: {} if pd.isna(x) else {s.strip(): float(g.strip()) 
+                                        for part in x.split(';') 
+                                        if ':' in part 
+                                        for s, g in [part.strip().split(':')]})
 
-        # 1. Данные 3 курса (для обучения модели)
-        train_data = students.iloc[364:524].copy()  # 3 курс - обучающая выборка
-        train_features = list(all_subjects_3rd_year)  # только предметы 3 курса
+        students, all_subjects = prepare_data(students)
 
-        # 2. Данные 2 курса (для предсказания)
-        predict_data = students.iloc[525:760].copy()  # 2 курс - данные для предсказания
-        predict_features = list(set(all_subjects_3rd_year).intersection(predict_data.columns))  # Пересечение предметов 3 и 2 курсов
+        # Разделение на курсы
+        train_data = students.iloc[364:524].copy() 
+        predict_data = students.iloc[525:760].copy()  
 
-        # 3. Замена "Долг" на -1 (в обоих датасетах)
-        for subject in all_subjects_3rd_year: 
-            if subject in train_data.columns:
-                train_data[subject] = train_data[subject].replace('Долг', -1).astype(float)
-            if subject in predict_data.columns:
-                predict_data[subject] = predict_data[subject].replace('Долг', -1).astype(float)
-
-        # 4. Обработка нулей (замена на NaN) (в обоих датасетах)
-        for subject in all_subjects_3rd_year:
-            if subject in train_data.columns:
-                train_data[subject] = train_data[subject].replace(0, np.nan)
-            if subject in predict_data.columns:
-                predict_data[subject] = predict_data[subject].replace(0, np.nan)
+        # Определяем общие предметы
+        common_subjects = list(set(train_data.columns).intersection(set(predict_data.columns)) & set(all_subjects))
 
         # --- Обучение и предсказание ---
-        predictions = {}
-        for subject in predict_features:  # Итерируемся по предметам, общим для 2 и 3 курсов
 
-            # 6. Подготовка данных для модели (преобразование оценок в категории)
-            X_train = train_data[train_features].copy()  # Все предметы 3 курса как признаки.
-            y_train = train_data[subject].apply(lambda x: 'Высокая' if x >= 4 else ('Низкая' if x < 4 and x > -1 else 'Долг'))
-            X_predict = predict_data[predict_features].copy()  # Все общие предметы 2 курса как признаки
+        # Создаем пайплайн для обработки данных
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('imputer', SimpleImputer(strategy='mean'), common_subjects)
+            ])
 
-            # 7. One-Hot Encoding (для категориальных признаков, если есть)
-            X_train = pd.get_dummies(X_train)
-            X_predict = pd.get_dummies(X_predict)
-            # ensure same columns in training and prediction
-            X_predict = X_predict.reindex(columns=X_train.columns, fill_value=0)
+        predictions = pd.DataFrame(index=predict_data.index)
 
-            # 8. Обучение модели
-            model = RandomForestClassifier(random_state=42)
-            model.fit(X_train.fillna(0), y_train)  # Обучаем модель, заполняя NaN нулями
-
-            # 9. Предсказание
-            y_pred = model.predict(X_predict.fillna(0))  # Предсказываем, заполняя NaN нулями
+        for subject in common_subjects:
+            # Подготовка данных
+            X_train = train_data[common_subjects]
+            y_train = train_data[subject]
+            
+            # Явно создаем 5 категорий (включая долги)
+            y_train_cat = pd.cut(y_train,
+                                bins=[-2, -0.5, 2.5, 3.5, 4.5, 5.5],
+                                labels=['Долг', '2', '3', '4', '5'],
+                                include_lowest=True)  # Важно!
+            
+            # Удаляем только нули (не трогая долги)
+            valid_idx = (y_train != 0) | (y_train == -1)  # Сохраняем и оценки, и долги
+            X_train = X_train[valid_idx]
+            y_train_cat = y_train_cat[valid_idx].dropna()
+            
+            if len(y_train_cat) < 10:
+                print(f"Недостаточно данных для предмета {subject}")
+                continue
+            
+            # Создаем и обучаем модель
+            model = make_pipeline(
+                preprocessor,
+                RandomForestClassifier(random_state=42)
+            )
+            model.fit(X_train, y_train_cat)
+            
+            # Предсказание
+            X_predict = predict_data[common_subjects]
+            y_pred = model.predict(X_predict)
             predictions[subject] = y_pred
 
+        # Добавляем предсказания
+        predict_data = pd.concat([predict_data, predictions.add_prefix('Predicted_')], axis=1)
 
-        # 10. Добавление предсказаний в DataFrame
-        for subject, pred in predictions.items():
-            predict_data[f'{subject}_prediction'] = pred
+        # --- Визуализация ---
 
-        # 11. Визуализация результатов
-        num_subjects = len(predict_features)  # Получаем количество предметов
-        cols = 3  # Количество столбцов для подграфиков
-        rows = (num_subjects + cols - 1) // cols  # Вычисляем количество строк
+        def show_student_predictions(student_id):
+            student = predict_data[predict_data['Student_ID'] == student_id].iloc[0]
+            pred_grades = student.filter(like='Predicted_').copy() # <--- Создаем копию!
+            
+            # Теперь изменяем индекс копии
+            pred_grades.index = pred_grades.index.str.replace('Predicted_', '')
+            
+            # Создаем DataFrame для визуализации (важно!)
+            grades_df = pd.DataFrame({
+                'Предмет': pred_grades.index,
+                'Результат': pred_grades.values
+            })
 
+            order = ['Долг', '2', '3', '4', '5']
+            grades_df['Результат'] = grades_df['Результат'].astype('category').cat.set_categories(order)
+            
+
+            
+            
+
+        def analyze_student(student_id):
+            student = predict_data[predict_data['Student_ID'] == student_id].iloc[0]
+            pred_grades = student.filter(like='Predicted_')
+        
+
+        # Пример использования
+        show_student_predictions(495)
+        analyze_student(495)
+
+        # Сохранение результатов
+        #predict_data.to_csv('student_predictions_with_debts.csv', index=False)
 
         # Выбираем нужные столбцы
-        columns_to_save = [
-            'Speciality', 'Group_Name', 'Student_ID', 'Name', 'Age', 'Is_Academic',
-            'Middle_value_of_sertificate', 'Entry_score', 'Rating_score', 'Diploma_grade'
-        ] + [col for col in predict_data.columns if '_prediction' in col]
+        columns_to_keep = [
+            'Student_ID', 'Name', 'Age', 'Group_Name', 'Speciality',
+            'Middle_value_of_sertificate', 'Entry_score', 'Rating_score',
+            'Diploma_grade', 'Is_Academic'
+        ] + [col for col in predict_data.columns if col.startswith('Predicted_')]
 
         # Создаем DataFrame с нужными столбцами
-        result_data = predict_data[columns_to_save]
+        result_data = predict_data[columns_to_keep].copy()
 
-        # Удаляем "_prediction" из названий столбцов
-        result_data.columns = [
-            col.replace("_prediction", "") if "_prediction" in col else col
-            for col in result_data.columns
-        ]
+        # Переименование: удаляем 'Predicted_' только из предметов
+        new_columns = []
+        for col in result_data.columns:
+            if col.startswith("Predicted_"):
+                new_columns.append(col.replace("Predicted_", ""))
+            else:
+                new_columns.append(col)
+
+        result_data.columns = new_columns
 
         # Сохраняем в CSV
         result_data.to_csv('application/management/predictions_results.csv', index=False, sep=';', encoding='utf-8')
+
         
 
